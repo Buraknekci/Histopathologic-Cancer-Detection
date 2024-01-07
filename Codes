@@ -1,0 +1,192 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+%matplotlib inline
+from glob import glob
+import cv2
+from skimage.io import imread
+import os
+import shutil
+from sklearn.metrics import roc_curve, auc, roc_auc_score
+from sklearn.model_selection import train_test_split
+from keras.preprocessing.image import ImageDataGenerator
+from keras.applications.nasnet import NASNetMobile
+from keras.applications import MobileNetV2
+from keras.applications.xception import Xception
+from keras.utils.vis_utils import plot_model
+from keras.layers import Dropout, Flatten, Dense, GlobalAveragePooling2D, Average, Input, Concatenate, GlobalMaxPooling2D
+from keras.models import Model
+from keras.callbacks import CSVLogger, ModelCheckpoint
+from keras.optimizers import Adam
+from livelossplot import PlotLossesKeras
+
+# Read CSV file
+df = pd.read_csv('/Users/Shambhavi Malik/Desktop/Cancer Detection/train_labels.csv')
+print('Shape of DataFrame', df.shape)
+
+# Visualize training examples
+training_dir = '/Users/Shambhavi Malik/Desktop/Cancer Detection/train/'
+
+fig = plt.figure(figsize=(20, 8))
+index = 1
+for i in np.random.randint(low=0, high=df.shape[0], size=10):
+    file = training_dir + df.iloc[i]['id'] + '.tif'
+    img = cv2.imread(file)
+    ax = fig.add_subplot(2, 5, index)
+    ax.imshow(img, cmap='gray')
+    index = index + 1
+    color = ['green' if df.iloc[i].label == 1 else 'red'][0]
+    ax.set_title(df.iloc[i].label, fontsize=18, color=color)
+plt.tight_layout()
+plt.show()
+
+# Take a sample size of 85000 to avoid crashing
+SAMPLE_SIZE = 85000
+
+# Take a random sample of class 0 with size equal to the num samples in class 1
+df_0 = df[df['label'] == 0].sample(SAMPLE_SIZE, random_state=0)
+# Filter out class 1
+df_1 = df[df['label'] == 1].sample(SAMPLE_SIZE, random_state=0)
+
+# Concatenate the dataframes
+df_train = pd.concat([df_0, df_1], axis=0).reset_index(drop=True)
+
+# Shuffle
+df_train = df_train.sample(frac=1).reset_index(drop=True)
+
+print(df_train['label'].value_counts())
+
+# Split into training and validation sets
+y = df_train['label']
+df_train, df_val = train_test_split(df_train, test_size=0.1, random_state=0, stratify=y)
+
+# Create a new directory
+b_dir = 'b_dir'
+os.mkdir(b_dir)
+
+# Folder Structure
+'''
+    * b_dir
+        |-- trn_dir
+            |-- 0   # No Tumor (negative)
+            |-- 1   # Has Tumor (positive)
+        |-- v_dir
+            |-- 0
+            |-- 1
+'''
+# Create a path to 'b_dir' to which we will join the names of the new folders
+# trn_dir
+trn_dir = os.path.join(b_dir, 'trn_dir')
+os.mkdir(trn_dir)
+
+# v_dir
+v_dir = os.path.join(b_dir, 'v_dir')
+os.mkdir(v_dir)
+
+# Create new folders inside trn_dir
+neg = os.path.join(trn_dir, '0')
+os.mkdir(neg)
+pos = os.path.join(trn_dir, '1')
+os.mkdir(pos)
+
+# Create new folders inside v_dir
+neg = os.path.join(v_dir, '0')
+os.mkdir(neg)
+pos = os.path.join(v_dir, '1')
+os.mkdir(pos)
+
+print(os.listdir('b_dir/trn_dir'))
+print(os.listdir('b_dir/v_dir'))
+
+# Get a list of train and val images
+train_list = list(df_train['id'])
+val_list = list(df_val['id'])
+
+for image in train_list:
+    file_name = image + '.tif'
+    target = df.loc[image, 'label']
+    if target == 0:
+        label = '0'
+    elif target == 1:
+        label = '1'
+    src = os.path.join('/Users/Shambhavi Malik/Desktop/Cancer Detection/train', file_name)
+    dest = os.path.join(trn_dir, label, file_name)
+    shutil.copyfile(src, dest)
+
+for image in val_list:
+    file_name = image + '.tif'
+    target = df.loc[image, 'label']
+    if target == 0:
+        label = '0'
+    elif target == 1:
+        label = '1'
+    src = os.path.join('/Users/Shambhavi Malik/Desktop/Cancer Detection/train', file_name)
+    dest = os.path.join(v_dir, label, file_name)
+    shutil.copyfile(src, dest)
+
+print(len(os.listdir('b_dir/trn_dir/0')))
+print(len(os.listdir('b_dir/trn_dir/1')))
+
+# Data Augmentation
+data_augmentation = ImageDataGenerator(rescale=1./255,
+                                       horizontal_flip=True,
+                                       vertical_flip=True,
+                                       rotation_range=180,
+                                       zoom_range=0.4,
+                                       width_shift_range=0.3,
+                                       height_shift_range=0.3,
+                                       shear_range=0.3,
+                                       channel_shift_range=0.3)
+
+batch_size = 192
+image_size = 96
+
+train_path = 'b_dir/trn_dir'
+val_path = 'b_dir/v_dir'
+test_path = '/Users/Shambhavi Malik/Desktop/Cancer Detection/test'
+
+train_set = data_augmentation.flow_from_directory(train_path,
+                                                  target_size=(image_size, image_size),
+                                                  batch_size=batch_size,
+                                                  class_mode='binary')
+
+val_set = ImageDataGenerator(rescale=1./255).flow_from_directory(val_path,
+                                                                  target_size=(image_size, image_size),
+                                                                  batch_size=batch_size,
+                                                                  class_mode='binary')
+
+test_set = ImageDataGenerator(rescale=1./255).flow_from_directory(test_path,
+                                                                   target_size=(image_size, image_size),
+                                                                   batch_size=batch_size,
+                                                                   class_mode='binary',
+                                                                   shuffle=False)
+
+input_shape = (image_size, image_size, 3)
+inputs = Input(input_shape)
+
+xception = Xception(include_top=False, input_shape=input_shape)(inputs)
+mobile_net = MobileNetV2(include_top=False, input_shape=input_shape)(inputs)
+
+# Concatenate or Average the features from Xception and MobileNetV2
+# Example with Concatenate layer
+outputs = Concatenate(axis=-1)([GlobalAveragePooling2D()(xception), GlobalAveragePooling2D()(mobile_net)])
+
+outputs = Dropout(0.5)(outputs)
+outputs = Dense(1, activation='sigmoid')(outputs)
+
+model = Model(inputs, outputs)
+model.compile(optimizer=Adam(lr=0.0001, decay=0.00001),
+              loss='binary_crossentropy',
+              metrics=['accuracy'])
+
+model.summary()
+
+history = model.fit_generator(train_set,
+                              steps_per_epoch=len(train_set),
+                              validation_data=val_set,
+                              validation_steps=len(val_set),
+                              epochs=10,
+                              verbose=1,
+                              callbacks=[PlotLossesKeras()])
+
+# Plot Training Loss Curve
